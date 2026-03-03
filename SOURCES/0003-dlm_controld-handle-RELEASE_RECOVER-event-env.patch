@@ -1,0 +1,232 @@
+From d317347643ec2610bbbd390493cf5e920f4ddd79 Mon Sep 17 00:00:00 2001
+From: Alexander Aring <aahringo@redhat.com>
+Date: Fri, 22 Nov 2024 12:45:36 -0500
+Subject: [PATCH 3/3] dlm_controld: handle RELEASE_RECOVER event env
+
+Newer kernels might sending an additional attribute for the leaving lockspace
+event "RELEASE_RECOVER" to tell other nodes from the release lockspace
+initator to call the recover_slot() callback in their recovery handling
+as a membership update triggers in-kernel recovery.
+---
+ dlm_controld/action.c     | 33 ++++++++++++++++++
+ dlm_controld/cpg.c        | 72 ++++++++++++++++++++++++++++++++++++++-
+ dlm_controld/dlm_daemon.h |  6 +++-
+ dlm_controld/main.c       |  4 ++-
+ 4 files changed, 112 insertions(+), 3 deletions(-)
+
+diff --git a/dlm_controld/action.c b/dlm_controld/action.c
+index 0eff2799..6d23a330 100644
+--- a/dlm_controld/action.c
++++ b/dlm_controld/action.c
+@@ -240,6 +240,39 @@ int path_exists(const char *path)
+ 	return 1;
+ }
+ 
++int set_configfs_member_release_recover(struct lockspace *ls, int id,
++					uint32_t release_recover)
++{
++	char path[PATH_MAX];
++	char buf[32];
++	int fd, rv;
++
++	memset(path, 0, PATH_MAX);
++	snprintf(path, PATH_MAX, "%s/%s/nodes/%d/release_recover",
++		 SPACES_DIR, ls->name, id);
++
++	rv = fd = open(path, O_WRONLY);
++	if (rv < 0) {
++		log_error("%s: open failed: %d", path, errno);
++		goto out;
++	}
++
++	memset(buf, 0, 32);
++	snprintf(buf, 32, "%u", release_recover);
++
++	rv = do_write(fd, buf, strlen(buf));
++	if (rv < 0) {
++		log_error("%s: write failed: %d, %s", path, errno, buf);
++		close(fd);
++		goto out;
++	}
++	close(fd);
++	rv = 0;
++
++out:
++	return rv;
++}
++
+ /* The "renew" nodes are those that have left and rejoined since the last
+    call to set_members().  We rmdir/mkdir for these nodes so dlm-kernel
+    can notice they've left and rejoined. */
+diff --git a/dlm_controld/cpg.c b/dlm_controld/cpg.c
+index f3365ee4..10139664 100644
+--- a/dlm_controld/cpg.c
++++ b/dlm_controld/cpg.c
+@@ -1057,6 +1057,23 @@ static void receive_start(struct lockspace *ls, struct dlm_header *hd, int len)
+ 	memb->start = 1;
+ }
+ 
++static void receive_release_recover(struct lockspace *ls,
++				    struct dlm_header *hd, int len)
++{
++	uint32_t release_recover = hd->msgdata;
++
++	log_dlock(ls, "%s %d: len %d release_recover %u", __func__,
++		  hd->nodeid, len, release_recover);
++
++	if (hd->nodeid == our_nodeid)
++		return;
++
++	/* try to set members release recover setting before removing to
++	 * tell other nodes the release recover option from the initiator.
++	 */
++	set_configfs_member_release_recover(ls, hd->nodeid, release_recover);
++}
++
+ static void receive_plocks_done(struct lockspace *ls, struct dlm_header *hd,
+ 				int len)
+ {
+@@ -1170,6 +1187,43 @@ static void send_info(struct lockspace *ls, struct change *cg, int type,
+ 	free(buf);
+ }
+ 
++static void send_release_recover_msg(struct lockspace *ls, int type,
++				     unsigned long release_recover)
++{
++	struct dlm_header *hd;
++	char *buf;
++	int len;
++
++	len = sizeof(struct dlm_header);
++
++	buf = malloc(len);
++	if (!buf) {
++		log_error("send_info len %d no mem", len);
++		return;
++	}
++	memset(buf, 0, len);
++
++	hd = (struct dlm_header *)buf;
++
++	/* fill in header (dlm_send_message handles part of header) */
++
++	hd->type = type;
++	hd->msgdata = release_recover;
++
++	dlm_send_message(ls, buf, len);
++
++	free(buf);
++}
++
++static void send_release_recover(struct lockspace *ls,
++				 unsigned long release_recover)
++{
++	log_group(ls, "%s %d: counts %u release_recover: %ld", __func__,
++		  our_nodeid, ls->started_count, release_recover);
++
++	send_release_recover_msg(ls, DLM_MSG_RELEASE_RECOVER, release_recover);
++}
++
+ /* fenced used the DUPLICATE_CG flag instead of sending nacks like we
+    do here.  I think the nacks didn't work for fenced for some reason,
+    but I don't remember why (possibly because the node blocked doing
+@@ -1642,6 +1696,10 @@ static void deliver_cb(cpg_handle_t handle,
+ 				  hd->type, nodeid, enable_plock);
+ 		break;
+ 
++	case DLM_MSG_RELEASE_RECOVER:
++		receive_release_recover(ls, hd, len);
++		break;
++
+ #if 0
+ 	case DLM_MSG_DEADLK_CYCLE_START:
+ 		if (opt(enable_deadlk))
+@@ -1809,12 +1867,24 @@ int dlm_join_lockspace(struct lockspace *ls)
+ 
+ /* received an "offline" uevent from dlm-kernel */
+ 
+-int dlm_leave_lockspace(struct lockspace *ls)
++int dlm_leave_lockspace(struct lockspace *ls, const char *release_recover_str)
+ {
+ 	cs_error_t error;
+ 	struct cpg_name name;
++	unsigned long release_recover;
+ 	int i = 0;
+ 
++	if (release_recover_str) {
++		release_recover = strtoul(release_recover_str, NULL, 0);
++		if (release_recover == ULONG_MAX) {
++			log_error("failed to parse release recover: %s",
++				  release_recover_str);
++			return errno;
++		}
++
++		send_release_recover(ls, release_recover);
++	}
++
+ 	ls->leaving = 1;
+ 
+ 	memset(&name, 0, sizeof(name));
+diff --git a/dlm_controld/dlm_daemon.h b/dlm_controld/dlm_daemon.h
+index 45b295ea..119eb543 100644
+--- a/dlm_controld/dlm_daemon.h
++++ b/dlm_controld/dlm_daemon.h
+@@ -236,6 +236,7 @@ enum {
+ 	DLM_MSG_RUN_REQUEST,
+ 	DLM_MSG_RUN_REPLY,
+ 	DLM_MSG_RUN_CANCEL,
++	DLM_MSG_RELEASE_RECOVER,
+ };
+ 
+ /* dlm_header flags */
+@@ -367,6 +368,8 @@ int set_sysfs_control(char *name, int val);
+ int set_sysfs_event_done(char *name, int val);
+ int set_sysfs_id(char *name, uint32_t id);
+ int set_sysfs_nodir(char *name, int val);
++int set_configfs_member_release_recover(struct lockspace *ls, int id,
++					uint32_t release_recover);
+ int set_configfs_members(struct lockspace *ls, char *name,
+ 			 int new_count, int *new_members,
+ 			 int renew_count, int *renew_members);
+@@ -389,7 +392,8 @@ void setup_lockspace_config(struct lockspace *ls);
+ void process_lockspace_changes(void);
+ void process_fencing_changes(void);
+ int dlm_join_lockspace(struct lockspace *ls);
+-int dlm_leave_lockspace(struct lockspace *ls);
++int dlm_leave_lockspace(struct lockspace *ls,
++			const char *release_recover_str);
+ void update_flow_control_status(void);
+ int set_node_info(struct lockspace *ls, int nodeid, struct dlmc_node *node);
+ int set_lockspace_info(struct lockspace *ls, struct dlmc_lockspace *lockspace);
+diff --git a/dlm_controld/main.c b/dlm_controld/main.c
+index 1828428c..2dc6b91b 100644
+--- a/dlm_controld/main.c
++++ b/dlm_controld/main.c
+@@ -51,6 +51,7 @@ enum {
+ 	Env_DEVPATH,
+ 	Env_SUBSYSTEM,
+ 	Env_LOCKSPACE,
++	Env_RELEASE_RECOVER,
+ 	Env_Last, /* Flag for end of vars */
+ };
+ 
+@@ -59,6 +60,7 @@ static const char *uevent_vars[] = {
+ 	[Env_DEVPATH]		= "DEVPATH=",
+ 	[Env_SUBSYSTEM]		= "SUBSYSTEM=",
+ 	[Env_LOCKSPACE]		= "LOCKSPACE=",
++	[Env_RELEASE_RECOVER]	= "RELEASE_RECOVER=",
+ };
+ 
+ static void decode_uevent(const char *buf, unsigned len, const char *vars[],
+@@ -770,7 +772,7 @@ static void process_uevent(int ci)
+ 			goto out;
+ 		}
+ 
+-		dlm_leave_lockspace(ls);
++		dlm_leave_lockspace(ls, uevent_vals[Env_RELEASE_RECOVER]);
+ 	}
+  out:
+ 	if (rv < 0)
+-- 
+2.43.0
+

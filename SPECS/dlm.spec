@@ -1,6 +1,6 @@
 Name:           dlm
 Version:        4.1.0
-Release:        1%{?dist}
+Release:        3%{?dist}
 License:        GPLv2 and GPLv2+ and LGPLv2+
 # For a breakdown of the licensing, see README.license
 Group:          System Environment/Kernel
@@ -15,6 +15,10 @@ BuildRequires:  systemd-devel
 Source0:	https://releases.pagure.org/dlm/%{name}-%{version}.tar.gz
 
 # Patch0: 0001-foo.patch
+Patch0: 0001-dlm_controld-better-uevent-filtering.patch
+Patch1: 0002-dlm_controld-terminate-uevent-buffer.patch
+Patch2: 0003-dlm_controld-handle-RELEASE_RECOVER-event-env.patch
+Patch3: 0001-dlm_controld-send-plock-operations-without-resource-.patch
 
 %if 0%{?rhel} && 0%{?rhel} <= 7
 ExclusiveArch: i686 x86_64
@@ -34,6 +38,10 @@ The kernel dlm requires a user daemon to control membership.
 %prep
 %setup -q
 # %patch0 -p1 -b .0001-foo.patch
+%patch0 -p1 -b .backup0
+%patch1 -p1 -b .backup1
+%patch2 -p1 -b .backup2
+%patch3 -p1 -b .backup3
 
 %build
 # upstream does not require configure
@@ -105,6 +113,14 @@ developing applications that use %{name}.
 %{_libdir}/pkgconfig/*.pc
 
 %changelog
+* Tue Jan 20 2026 Alexander Aring <aahringo@redhat.com> - 4.1.0-3
+- Rebuild for posix lock issue fix
+  Related: RHEL-140243
+
+* Tue Dec 16 2025 Alexander Aring <aahringo@redhat.com> - 4.1.0-2
+- Rebuild for recover flag functionality
+  Related: RHEL-136235
+
 * Wed Jan 13 2021 David Teigland <teigland@redhat.com> - 4.1.0-1
 - update to 4.1.0
 

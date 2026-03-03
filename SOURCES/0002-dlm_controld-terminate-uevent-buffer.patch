@@ -1,0 +1,26 @@
+From 615e7936d39248de09dc9c5e7570463387f7d139 Mon Sep 17 00:00:00 2001
+From: David Teigland <teigland@redhat.com>
+Date: Thu, 15 Aug 2024 11:05:54 -0500
+Subject: [PATCH 2/3] dlm_controld: terminate uevent buffer
+
+for checker
+---
+ dlm_controld/main.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dlm_controld/main.c b/dlm_controld/main.c
+index 74a5e61b..1828428c 100644
+--- a/dlm_controld/main.c
++++ b/dlm_controld/main.c
+@@ -715,6 +715,8 @@ static void process_uevent(int ci)
+ 		return;
+ 	}
+ 
++	buf[MAX_LINE_UEVENT-1] = '\0';
++
+ 	decode_uevent(buf, rv, uevent_vars, Env_Last, uevent_vals);
+ 
+ 	if (!uevent_vals[Env_ACTION] ||
+-- 
+2.43.0
+
