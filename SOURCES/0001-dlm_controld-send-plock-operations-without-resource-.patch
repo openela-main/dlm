@@ -1,0 +1,75 @@
+From d97b013a06af9999dfc35a37492617f11eb01cd2 Mon Sep 17 00:00:00 2001
+From: David Teigland <teigland@redhat.com>
+Date: Tue, 13 Jan 2026 16:59:25 -0600
+Subject: [PATCH dlm/tool] dlm_controld: send plock operations without resource
+ lookup
+
+When plock_ownership mode is disabled, a plock operation read from
+the kernel can be sent to all nodes immediately, without looking up
+the local resource struct.  This is faster, and it avoids a bug in
+cases where multiple threads in a process submit concurrent fcntl
+lock ops on a file.
+
+This bug occurs because create/free of the resource struct should
+only be done in the context of ordered receive_plock cpg messages.
+plock unlock results were being incorrectly returned based on the
+non-existence of a struct resource checked in process_plocks (outside
+of the ordered message context.)  In this case, the existence of the
+resource struct was used to imply a lock state ("no locks"), which is
+invalid to conclude outside of the message context.  The bug would
+only appear in the unusual scenario where multiple threads in a
+process are running concurrent fcntl lock operations on a file.
+
+This fix does not address the problem when plock_ownership is enabled,
+so warnings are added for the plock_ownership setting.
+---
+ dlm_controld/dlm_controld.8 | 2 ++
+ dlm_controld/main.c         | 2 +-
+ dlm_controld/plock.c        | 5 +++++
+ 3 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/dlm_controld/dlm_controld.8 b/dlm_controld/dlm_controld.8
+index d72ebb29..a607f73c 100644
+--- a/dlm_controld/dlm_controld.8
++++ b/dlm_controld/dlm_controld.8
+@@ -50,6 +50,8 @@ For default settings, see dlm_controld -h.
+ .B --plock_ownership | -o
+ 0|1
+         enable/disable plock ownership
++.br
++        (WARNING: do not enable if threads perform fcntl locking.)
+ 
+ .B --drop_resources_time | -t
+ .I int
+diff --git a/dlm_controld/main.c b/dlm_controld/main.c
+index a4beb312..d2dfe601 100644
+--- a/dlm_controld/main.c
++++ b/dlm_controld/main.c
+@@ -1860,7 +1860,7 @@ static void set_opt_defaults(void)
+ 	set_opt_default(plock_ownership_ind,
+ 			"plock_ownership", 'o', req_arg_bool,
+ 			0, NULL, 0, 0,
+-			"enable/disable plock ownership");
++			"enable/disable plock ownership (do not enable if threads do fcntl locking)");
+ 
+ 	set_opt_default(drop_resources_time_ind,
+ 			"drop_resources_time", 't', req_arg_int,
+diff --git a/dlm_controld/plock.c b/dlm_controld/plock.c
+index 1944cd59..30cf61a5 100644
+--- a/dlm_controld/plock.c
++++ b/dlm_controld/plock.c
+@@ -1599,6 +1599,11 @@ void process_plocks(int ci)
+ 		plock_rate_delays = 0;
+ 	}
+ 
++	if (!opt(plock_ownership_ind)) {
++		send_plock(ls, NULL, &info);
++		return;
++	}
++
+ 	create = (info.optype == DLM_PLOCK_OP_UNLOCK) ? 0 : 1;
+ 
+ 	rv = find_resource(ls, info.number, create, &r);
+-- 
+2.43.0
+

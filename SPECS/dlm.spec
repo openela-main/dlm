@@ -1,6 +1,6 @@
 Name:           dlm
 Version:        4.3.0
-Release:        1%{?dist}
+Release:        3%{?dist}
 License:        GPLv2 and GPLv2+ and LGPLv2+
 # For a breakdown of the licensing, see README.license
 Summary:        dlm control daemon and tool
@@ -14,6 +14,8 @@ BuildRequires:  systemd-units
 BuildRequires:  systemd-devel
 BuildRequires: make
 Source0:	https://releases.pagure.org/dlm/%{name}-%{version}.tar.gz
+
+Patch0: 0001-dlm_controld-send-plock-operations-without-resource-.patch
 
 %if 0%{?rhel} && 0%{?rhel} <= 7
 ExclusiveArch: i686 x86_64
@@ -32,6 +34,8 @@ The kernel dlm requires a user daemon to control membership.
 
 %prep
 %setup -q
+
+%patch0 -p1 -b .backup0
 
 %build
 # upstream does not require configure
@@ -96,6 +100,14 @@ developing applications that use %{name}.
 %{_libdir}/pkgconfig/*.pc
 
 %changelog
+* Fri Feb 06 2026 Alexander Aring <aahringo@redhat.com> - 4.3.0-3
+- Trigger build
+  Related: RHEL-143037
+
+* Fri Feb 06 2026 Alexander Aring <aahringo@redhat.com> - 4.3.0-2
+- Rebuild for posix lock issue fix
+  Related: RHEL-143037
+
 * Wed May 15 2024 David Teigland <teigland@redhat.com> - 4.3.0-1
 - new upstream version
 
